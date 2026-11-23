@@ -1,55 +1,44 @@
-"""The result model of the Custom Search JSON API.
+"""The result model of the Google web search client.
 
 The shape of a hit follows the shape of the renderer
 (``gsearch-renderer``): ``title``, ``url`` and ``snippet`` are the fields a
-caller expects, the rest of the answer of the API is kept as it is.
+caller expects, the rest of the answer of Google is kept as it is.
 """
 
 from __future__ import annotations
 
+import html as html_lib
+import re
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
 
 @dataclass(frozen=True)
 class SearchHit:
-    """One hit of the API."""
+    """One hit of the result page of Google."""
 
     title: str
     url: str
     snippet: str = ""
     display_link: str = ""
-    file_format: str = ""
-    mime: str = ""
     rank: int = 0
-    metags: tuple[str, ...] = ()
-    sitelinks: tuple[dict[str, Any], ...] = ()
-    pagemap: dict[str, Any] = field(default_factory=dict)
+    resolved: bool = True
+    source: str = "google"
 
     @classmethod
-    def from_api(cls, item: dict[str, Any], rank: int = 0) -> "SearchHit":
-        link = item.get("link") or item.get("url") or ""
-        pagemap = item.get("pagemap") or {}
-        metags = item.get("metaTags") or []
-        sitelinks = item.get("sitelinks") or []
+    def from_serp(cls, item: dict[str, Any], rank: int = 0) -> "SearchHit":
         return cls(
             title=str(item.get("title") or "").strip(),
-            url=str(link).strip(),
+            url=str(item.get("url") or "").strip(),
             snippet=_clean_html(item.get("snippet") or ""),
-            display_link=str(item.get("displayLink") or "").strip(),
-            file_format=str(item.get("fileFormat") or "").strip(),
-            mime=str(item.get("mime") or "").strip(),
+            display_link=str(item.get("display_link") or "").strip(),
             rank=rank,
-            metags=tuple(str(tag) for tag in metags if isinstance(tag, dict)),
-            sitelinks=tuple(link for link in sitelinks if isinstance(link, dict)),
-            pagemap=pagemap if isinstance(pagemap, dict) else {},
+            resolved=bool(item.get("resolved", True)),
+            source=str(item.get("source") or "google"),
         )
 
     def to_dict(self) -> dict[str, Any]:
-        data = asdict(self)
-        data["metags"] = list(self.metags)
-        data["sitelinks"] = list(self.sitelinks)
-        return data
+        return asdict(self)
 
 
 @dataclass(frozen=True)
@@ -61,27 +50,27 @@ class SearchResponse:
     total: int = 0
     pages_fetched: int = 0
     duration_ms: int = 0
-    searches: tuple[dict[str, Any], ...] = field(default_factory=tuple)
+    source: str = "google"
+    engine: str = "google"
+    diagnostics: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "engine": "google_cse",
+            "engine": self.engine,
+            "source": self.source,
             "query": self.query,
             "count": len(self.hits),
             "total_results": self.total,
             "pages_fetched": self.pages_fetched,
             "duration_ms": self.duration_ms,
             "results": [hit.to_dict() for hit in self.hits],
-            "searches": [dict(search) for search in self.searches],
+            "diagnostics": dict(self.diagnostics),
         }
 
 
 def _clean_html(value: Any) -> str:
     """Turns the HTML of a snippet into plain text."""
 
-    import html
-    import re
-
     text = re.sub(r"<[^>]+>", "", str(value))
-    text = html.unescape(text)
+    text = html_lib.unescape(text)
     return re.sub(r"\s+", " ", text).strip()

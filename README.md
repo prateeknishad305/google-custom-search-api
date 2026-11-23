@@ -1,15 +1,18 @@
-# Google Custom Search API
+# Google Web Search API
 
-A small Python client and a small HTTP service for the **Google Custom Search
-JSON API** (`customsearch/v1`).
+A standalone Python client and a small HTTP service for the **web search of
+Google**.
 
-The answer has the same shape as the renderer of the Node project
-[`gsearch-renderer`](https://github.com/prateeknishad305/gsearch-renderer), so
-a caller can switch between both without touching the rest of the code:
+There is no API key and no search engine id: a full web search is a request to
+the result page of Google, the client reads the hits out of the answer itself
+and puts the exact destination of every hit in the answer. The package does
+not call the Node renderer, it has its own parser, its own browser and its own
+pool of exits.
 
 ```json
 {
-  "engine": "google_cse",
+  "engine": "google",
+  "source": "google",
   "query": "rust async runtime",
   "count": 2,
   "results": [
@@ -17,7 +20,9 @@ a caller can switch between both without touching the rest of the code:
       "title": "The Async Ecosystem",
       "url": "https://rust-lang.github.io/async-book/08_ecosystem/00_chapter.html",
       "snippet": "A chapter about async.",
-      "rank": 1
+      "rank": 1,
+      "resolved": true,
+      "source": "google"
     }
   ]
 }
@@ -25,18 +30,24 @@ a caller can switch between both without touching the rest of the code:
 
 ## What it does
 
-- **One request, ten hits.** The API answers ten hits per request. A search of
-  more hits is more than one request, and those requests do not depend on each
-  other: they are sent at the same time.
-- **Async first.** The client is built on `httpx.AsyncClient`, the pages of a
-  long answer are gathered with `asyncio.gather` and the connection pool is
-  reused between the searches.
-- **Clean errors.** The status of the API is mapped to an error of the client:
-  `AuthenticationError`, `InvalidRequestError`, `QuotaError`, `RateLimitError`,
-  `TransportError` and `EmptyResultsError`.
+- **Its own parser.** The cards of the result page are read with `lxml`, the
+  destination of a hit is unwrapped from the link of Google and the hits whose
+  cite is cut off are matched against the inline destinations of the page.
+- **Its own browser.** The page of the result is rendered with Chromium
+  (camoufox is the second choice), with the cookies of the consent, with the
+  traces of the automation hidden and with the exit of the request on the
+  context.
+- **Its own pool of exits.** Google blocks the address of a data centre fast.
+  The client asks a few exits at the same time and the first exit that answers
+  with hits wins.
+- **Async first.** The client is built on `httpx.AsyncClient` and
+  `playwright`, the pages of a long answer are asked at the same time and the
+  browser is opened once for the whole search.
+- **Clean errors.** `GoogleSearchError` is the base of `InvalidRequestError`,
+  `TransportError`, `BlockedError`, `RateLimitError` and `EmptyResultsError`.
 - **A service with the shape of the renderer.** `GET /api/search?q=...&num=...`
   answers with the same fields as the Node renderer, `GET /health` says whether
-  the service has the credentials it needs.
+  the service is ready.
 
 ## Install
 
@@ -48,6 +59,13 @@ pip install -r requirements.txt
 pip install -e .
 ```
 
+The browser needs Playwright and a Chromium of the system:
+
+```bash
+# Install Playwright
+pip install "google-custom-search-api[browser]"
+```
+
 For the tests:
 
 ```bash
@@ -57,104 +75,104 @@ pytest -q
 
 ## Configure
 
-The service needs an API key and the id of a programmable search engine. Both
-belong to the operator of the service, they are read from the environment and
-are never part of the source tree:
+Every setting is an environment variable, `.env.example` holds the whole list:
 
-```bash
-export GOOGLE_CSE_API_KEY=your-api-key-here
-export GOOGLE_CSE_CX=your-search-engine-id-here
-```
+| Variable | Meaning |
+| --- | --- |
+| `GOOGLE_SEARCH_ENDPOINT` | The result page of Google |
+| `GOOGLE_SEARCH_TIMEOUT` | The timeout of one request in seconds |
+| `GOOGLE_SEARCH_MAX_RESULTS` | The highest number of hits one search may answer |
+| `GOOGLE_SEARCH_PROXY` | The exit of the request |
+| `GOOGLE_SEARCH_HL` / `GOOGLE_SEARCH_GL` | The language and the country of the hits |
+| `GOOGLE_SEARCH_MAX_CONCURRENCY` | How many pages are asked at the same time |
+| `GOOGLE_SEARCH_MODE` | `browser`, `http` or `auto` |
+| `GOOGLE_SEARCH_BROWSER` | `chromium` or `firefox` |
+| `GOOGLE_SEARCH_BROWSER_PATH` | The binary of the browser, empty picks the default |
+| `GOOGLE_SEARCH_POOL` | The list of the exits |
+| `GOOGLE_SEARCH_EXITS` | How many exits one search may ask |
+| `GOOGLE_SEARCH_RACE` | How many exits are asked at the same time |
 
-`.env.example` holds the whole list of the settings:
-
-| Variable | Meaning | Default |
-| --- | --- | --- |
-| `GOOGLE_CSE_API_KEY` | the key of the Custom Search JSON API | required |
-| `GOOGLE_CSE_CX` | the id of the programmable search engine | required |
-| `GOOGLE_CSE_ENDPOINT` | the endpoint of the API | `https://www.googleapis.com/customsearch/v1` |
-| `GOOGLE_CSE_TIMEOUT` | the timeout of one request in seconds | `10` |
-| `GOOGLE_CSE_MAX_RESULTS` | the highest number of hits one search may answer with | `100` |
-
-## Use the client
+## Use it in the code
 
 ```python
 import asyncio
 
-from google_custom_search import GoogleCustomSearchClient
+from google_custom_search import GoogleSearchClient
 
 
-async def main() -> None:
-    client = GoogleCustomSearchClient(api_key="...", cx="...")
-    answer = await client.search("rust async runtime", num=25)
-    for hit in answer.hits:
-        print(hit.rank, hit.url)
-    await client.aclose()
+async def main():
+    async with GoogleSearchClient() as client:
+        answer = await client.search("rust async runtime", num=25)
+        for hit in answer.hits:
+            print(hit.rank, hit.title, hit.url)
 
 
 asyncio.run(main())
 ```
 
-The filters of the API are parameters of the search:
+The search understands the operators of Google and keeps the contract of the
+site operator:
 
 ```python
-answer = await client.search(
-    "async runtime",
-    num=20,
-    site_search="github.com",   # only the hits of this host
-    file_type="pdf",            # only the hits of this file type
-    language="en",              # lr
-    country="us",               # gl
-    safe="active",
-    date_restrict="m1",         # d1, w1, m1, y1
-)
+answer = await client.search("async runtime site:github.com", num=20)
+answer = await client.search("report", site="arxiv.org", file_type="pdf")
 ```
 
-Several queries at once:
-
-```python
-answers = await client.search_many(["rust async", "tokio tutorial"], num=10)
-```
-
-## Use the service
+## Use it as a service
 
 ```bash
 # Start the service
-uvicorn google_custom_search.server:app --host 0.0.0.0 --port 8000
-
-# Search
-curl "http://127.0.0.1:8000/api/search?q=rust+async+runtime&num=10"
-
-# Search with the filters
-curl "http://127.0.0.1:8000/api/search?q=rust+async&site=github.com&filetype=pdf"
-
-# The state of the service
-curl "http://127.0.0.1:8000/health"
+uvicorn google_custom_search.server:app --host 0.0.0.0 --port 8080
 ```
-
-## Use the command line
 
 ```bash
-python -m google_custom_search.cli "rust async runtime" --num 20
-python -m google_custom_search.cli "rust async runtime" --site github.com --json
+# Ask for hits
+curl "http://127.0.0.1:8080/api/search?q=rust+async+runtime&num=10"
+
+# Ask the health of the service
+curl "http://127.0.0.1:8080/health"
 ```
 
-## Layout
+## Use it from the shell
 
+```bash
+# Print the hits
+google-custom-search --query "rust async runtime" --num 10
+
+# Print the answer as JSON
+google-custom-search --query "rust async runtime" --num 10 --json
 ```
-google_custom_search/
-├── __init__.py    the public API of the package
-├── cli.py         the command line
-├── client.py      the client of the Custom Search JSON API
-├── config.py      the settings of the service
-├── errors.py      the errors of the client
-├── models.py      the hits and the answer
-└── server.py      the HTTP service (FastAPI)
-tests/
-├── test_client.py
-└── test_server.py
+
+## The modules
+
+| Module | What it holds |
+| --- | --- |
+| `google_custom_search/client.py` | The client: the parameters, the pages, the race of the exits |
+| `google_custom_search/fetchers.py` | The plain request and the browser that renders the page |
+| `google_custom_search/parser.py` | The cards of the page, the destinations, the cites |
+| `google_custom_search/dork.py` | The operators of Google and the contract of the site operator |
+| `google_custom_search/pool.py` | The list of the exits and the health of the exits |
+| `google_custom_search/models.py` | `SearchHit` and `SearchResponse` |
+| `google_custom_search/errors.py` | The errors of the client |
+| `google_custom_search/server.py` | The service |
+| `google_custom_search/cli.py` | The command line |
+
+## Tests
+
+```bash
+pytest -q
 ```
+
+The tests of the parser, of the client and of the service run without a
+network.
+
+## Note
+
+The search of Google is the result page of Google, and Google changes that page
+and the way it blocks automated traffic from time to time. The client answers
+with an error when Google blocks the request (`BlockedError`), it never makes
+up a hit.
 
 ## License
 
-MIT
+MIT, see `LICENSE`.

@@ -1,127 +1,112 @@
-"""Tests of the Custom Search JSON API client."""
+"""Tests of the web search client of Google."""
 
 from __future__ import annotations
 
-import httpx
+import sys
+from pathlib import Path
+
 import pytest
 
-from google_custom_search import (
-    AuthenticationError,
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from google_custom_search import (  # noqa: E402
+    BlockedError,
     EmptyResultsError,
-    GoogleCustomSearchClient,
+    GoogleSearchClient,
     InvalidRequestError,
 )
-
-PAGE = {
-    "kind": "customsearch#search",
-    "searchInformation": {"totalResults": "42"},
-    "search": {"searchTerms": "rust"},
-    "items": [
-        {
-            "title": "The Async Ecosystem",
-            "link": "https://rust-lang.github.io/async-book/08_ecosystem/00_chapter.html",
-            "snippet": "A chapter about <b>async</b>.",
-            "displayLink": "rust-lang.github.io",
-            "fileFormat": "HTML",
-            "mime": "text/html",
-        },
-        {
-            "title": "Tokio tutorial",
-            "link": "https://tokio.rs/tokio/tutorial/async",
-            "snippet": "Learn async.",
-            "displayLink": "tokio.rs",
-        },
-    ],
-}
+from tests.fixtures import BLOCKED_HTML, EMPTY_HTML, SERP_HTML  # noqa: E402
 
 
-def client_with(handler, **kwargs) -> GoogleCustomSearchClient:
-    transport = httpx.MockTransport(handler)
-    http_client = httpx.AsyncClient(transport=transport)
-    return GoogleCustomSearchClient("key", "cx", http_client=http_client, **kwargs)
+class FakeFetcher:
+    """The fetcher of the client in the tests: the answer is known."""
+
+    def __init__(self, handler) -> None:
+        self.handler = handler
+        self.calls: list[dict] = []
+
+    async def start(self) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
+
+    async def fetch(self, params: dict, proxy: str = "") -> str:
+        self.calls.append(dict(params))
+        answer = self.handler(params)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+
+def client_with(handler, **kwargs) -> GoogleSearchClient:
+    fetcher = FakeFetcher(handler)
+    client = GoogleSearchClient(fetcher=fetcher, pool_url="", **kwargs)
+    client.fake = fetcher
+    return client
 
 
 def test_build_params_carries_the_query_and_the_filters():
-    client = GoogleCustomSearchClient("key", "cx")
+    client = GoogleSearchClient()
     params = client.build_params(
         "rust async",
         num=25,
         start=10,
-        site_search="github.com",
+        site="github.com",
         file_type="pdf",
         language="en",
         country="us",
     )
-    assert params["q"] == "rust async"
-    assert params["num"] == 10
+    assert params["q"] == "rust async github.com"
+    assert params["as_sitesearch"] == "github.com"
     assert params["start"] == 10
-    assert params["siteSearchFilter"] == "github.com"
-    assert params["fileType"] == "pdf"
-    assert params["lr"] == "en"
+    assert params["hl"] == "en"
     assert params["gl"] == "us"
-    assert params["key"] == "key"
-    assert params["cx"] == "cx"
+    assert params["as_filetype"] == "pdf"
+    assert "num" not in params
 
 
 @pytest.mark.asyncio
-async def test_search_answers_with_the_hits_of_the_api():
-    calls: list[httpx.URL] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        calls.append(request.url)
-        return httpx.Response(200, json=PAGE)
-
-    client = client_with(handler)
-    answer = await client.search("rust async", num=2)
-    assert len(answer.hits) == 2
+async def test_search_answers_with_the_hits_of_the_page():
+    client = client_with(lambda params: SERP_HTML)
+    answer = await client.search("rust async", num=4)
+    assert len(answer.hits) == 4
     assert answer.hits[0].url == "https://rust-lang.github.io/async-book/08_ecosystem/00_chapter.html"
     assert answer.hits[0].rank == 1
-    assert answer.hits[0].snippet == "A chapter about async."
-    assert answer.total == 42
+    assert answer.hits[0].snippet.startswith("The async book is a chapter")
     assert answer.pages_fetched == 1
-    assert len(calls) == 1
+    assert answer.engine == "google"
+    assert len(client.fake.calls) == 1
 
 
 @pytest.mark.asyncio
-async def test_search_sends_the_pages_of_a_long_answer_at_the_same_time():
-    starts: list[str] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        starts.append(request.url.params.get("start", ""))
-        return httpx.Response(200, json=PAGE)
-
-    client = client_with(handler)
-    answer = await client.search("rust async", num=25)
-    assert sorted(starts) == ["0", "10", "20"]
-    assert len(answer.hits) == 6
+async def test_search_asks_the_pages_of_a_long_answer_at_the_same_time():
+    client = client_with(lambda params: SERP_HTML)
+    answer = await client.search("rust async", num=20)
+    starts = sorted(call["start"] for call in client.fake.calls)
+    assert starts == [0, 10]
+    assert len(answer.hits) == 4
 
 
 @pytest.mark.asyncio
-async def test_search_reports_the_error_of_the_api():
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(400, json={"error": {"message": "bad request"}})
-
-    client = client_with(handler)
-    with pytest.raises(InvalidRequestError):
-        await client.search("rust async")
+async def test_search_keeps_the_hits_of_the_host_that_was_asked_for():
+    client = client_with(lambda params: SERP_HTML)
+    answer = await client.search("tokio", site="tokio.rs")
+    urls = [hit.url for hit in answer.hits]
+    assert urls == ["https://tokio.rs/tokio/tutorial/async"]
+    assert all("tokio.rs" in url for url in urls)
 
 
 @pytest.mark.asyncio
-async def test_search_reports_the_missing_key():
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(403, json={"error": {"message": "forbidden"}})
-
-    client = client_with(handler)
-    with pytest.raises(AuthenticationError):
+async def test_search_reports_a_block_of_google():
+    client = client_with(lambda params: BLOCKED_HTML)
+    with pytest.raises(BlockedError):
         await client.search("rust async")
 
 
 @pytest.mark.asyncio
 async def test_search_raises_when_the_query_has_no_hit():
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"searchInformation": {"totalResults": "0"}, "items": []})
-
-    client = client_with(handler)
+    client = client_with(lambda params: EMPTY_HTML)
     with pytest.raises(EmptyResultsError):
         await client.search("rust async")
     answer = await client.search("rust async", allow_empty=True)
@@ -129,11 +114,18 @@ async def test_search_raises_when_the_query_has_no_hit():
 
 
 @pytest.mark.asyncio
+async def test_search_refuses_an_empty_query():
+    client = client_with(lambda params: SERP_HTML)
+    with pytest.raises(InvalidRequestError):
+        await client.search("   ")
+
+
+@pytest.mark.asyncio
 async def test_search_many_keeps_the_answers_that_worked():
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.params.get("q") == "bad":
-            return httpx.Response(400, json={"error": {"message": "bad request"}})
-        return httpx.Response(200, json=PAGE)
+    def handler(params):
+        if params["q"] == "bad":
+            return BlockedError("Google answered with a block")
+        return SERP_HTML
 
     client = client_with(handler)
     answers = await client.search_many(["rust", "bad", "tokio"])

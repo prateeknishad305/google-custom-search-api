@@ -1,30 +1,40 @@
-"""A thin client and service for the Google Custom Search JSON API."""
+"""A Python client and a small service for the web search of Google.
 
-from .client import GoogleCustomSearchClient
+Google has no API for a full web search any more, the answer comes from the
+result page itself. This package asks that page, reads the hits out of it and
+puts the exact destination of every hit in the answer.
+"""
+
+from .client import GoogleSearchClient
 from .config import ConfigurationError, Settings
 from .errors import (
-    AuthenticationError,
-    CustomSearchError,
+    BlockedError,
     EmptyResultsError,
+    GoogleSearchError,
     InvalidRequestError,
-    QuotaError,
     RateLimitError,
     TransportError,
 )
 from .models import SearchHit, SearchResponse
 
-__version__ = "1.0.0"
+# The name the first version of the package used, kept so that the old imports
+# keep working.
+GoogleCustomSearchClient = GoogleSearchClient
+CustomSearchError = GoogleSearchError
+
+__version__ = "2.0.0"
 
 __all__ = [
+    "GoogleSearchClient",
     "GoogleCustomSearchClient",
     "SearchHit",
     "SearchResponse",
     "Settings",
     "ConfigurationError",
+    "GoogleSearchError",
     "CustomSearchError",
-    "AuthenticationError",
     "InvalidRequestError",
-    "QuotaError",
+    "BlockedError",
     "RateLimitError",
     "TransportError",
     "EmptyResultsError",

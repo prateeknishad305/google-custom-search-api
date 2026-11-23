@@ -1,4 +1,4 @@
-"""Command line of the Custom Search JSON API client.
+"""Command line of the web search client of Google.
 
     python -m google_custom_search.cli "rust async runtime" --num 20
     python -m google_custom_search.cli "rust async runtime" --site github.com
@@ -11,14 +11,15 @@ import asyncio
 import json
 import sys
 
-from .client import GoogleCustomSearchClient
+from .client import GoogleSearchClient
 from .config import ConfigurationError, Settings
-from .errors import CustomSearchError
+from .errors import GoogleSearchError
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="google-custom-search", description="Search with the Custom Search JSON API.")
-    parser.add_argument("query", help="the query")
+    parser = argparse.ArgumentParser(prog="google-custom-search", description="Search the web with Google.")
+    parser.add_argument("query", nargs="?", help="the query")
+    parser.add_argument("--query", dest="query_flag", default=None, help="the query")
     parser.add_argument("--num", type=int, default=10, help="the number of hits (default: 10)")
     parser.add_argument("--start", type=int, default=0, help="the first hit of the answer")
     parser.add_argument("--site", default=None, help="only the hits of this host")
@@ -26,31 +27,54 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--hl", default=None, help="the language of the hits")
     parser.add_argument("--gl", default=None, help="the country of the hits")
     parser.add_argument("--safe", default=None, help="active, passive or off")
-    parser.add_argument("--date-restrict", default=None, help="d1, w1, m1 or y1")
+    parser.add_argument("--url", default=None, help="the result page of Google (default: www.google.com/search)")
+    parser.add_argument("--proxy", default=None, help="the exit of the request, http://host:port")
+    parser.add_argument("--timeout", type=float, default=None, help="the timeout of one request in seconds")
+    parser.add_argument("--mode", default=None, choices=["auto", "browser", "http"], help="how the page is asked")
+    parser.add_argument("--browser", default=None, choices=["chromium", "firefox"], help="the browser that renders the page")
     parser.add_argument("--json", action="store_true", help="answers with JSON")
     return parser
 
 
 async def run(args: argparse.Namespace) -> int:
+    query = args.query or args.query_flag
+    if not query:
+        print("error: the query is empty", file=sys.stderr)
+        return 2
     try:
         settings = Settings.from_env()
     except ConfigurationError as exc:
         print(str(exc), file=sys.stderr)
         return 2
-    client = GoogleCustomSearchClient.from_settings(settings)
+    client = GoogleSearchClient(
+        endpoint=args.url or settings.endpoint,
+        timeout=args.timeout if args.timeout else settings.timeout,
+        max_results=settings.max_results,
+        proxy=args.proxy if args.proxy else settings.proxy,
+        user_agent=settings.user_agent,
+        hl=args.hl or settings.hl,
+        gl=args.gl or settings.gl,
+        safe=args.safe or settings.safe,
+        max_concurrency=settings.max_concurrency,
+        mode=args.mode or settings.mode,
+        browser=args.browser or settings.browser,
+        executable_path=settings.executable_path,
+        pool_url=settings.pool_url,
+        exits_per_search=settings.exits_per_search,
+        race_size=settings.race_size,
+    )
     try:
         answer = await client.search(
-            args.query,
+            query,
             num=args.num,
             start=args.start,
-            site_search=args.site,
+            site=args.site,
             file_type=args.filetype,
             language=args.hl,
             country=args.gl,
             safe=args.safe,
-            date_restrict=args.date_restrict,
         )
-    except CustomSearchError as exc:
+    except GoogleSearchError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     finally:
